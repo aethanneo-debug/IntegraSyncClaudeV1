@@ -518,6 +518,10 @@ export interface TrainingParticipant {
 export interface TrainingLiquidationExpense {
   id: string;
   trainingProgramId: string;
+  // Which enrolled participant this expense is charged to. Optional — program-wide
+  // costs (venue rental, speaker fees) legitimately have no single owner.
+  trainingParticipantId?: string;
+  employeeId?: string; // denormalised from the participant, for display/filtering
   expenseCategory: "Meals" | "Transportation" | "Accommodation" | "Materials" | "Venue Rental" | "Speaker Fees" | "Miscellaneous";
   description: string;
   amount: number;

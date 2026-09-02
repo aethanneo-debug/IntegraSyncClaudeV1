@@ -47,7 +47,8 @@ import {
   TrainingParticipant,
   TrainingLiquidationExpense,
   TrainingBudgetSplit,
-  SpendingCategory
+  SpendingCategory,
+  SPENDING_CATEGORIES
 } from "./src/types";
 
 const app = express();
@@ -2073,7 +2074,7 @@ app.get("/api/finance/budgets", authenticateToken, (req: any, res: any) => {
 });
 
 app.post("/api/finance/budgets", authenticateToken, (req: any, res) => {
-  const { department, budgetAllocation, allocatedPS, allocatedMOOE, allocatedCO, approvedRequestId, fiscalYearId } = req.body;
+  const { department, category, budgetAllocation, allocatedPS, allocatedMOOE, allocatedCO, approvedRequestId, fiscalYearId } = req.body;
   if ((req as any).user.role !== UserRole.SUPER_ADMIN && (req as any).user.role !== UserRole.BUDGET_OFFICER && (req as any).user.role !== UserRole.FINANCE_OFFICER) {
     return res.status(403).json({ status: "error", message: "Unauthorized. Requires Budget Officer or Admin." });
   }
@@ -2085,13 +2086,20 @@ app.post("/api/finance/budgets", authenticateToken, (req: any, res) => {
   }
 
   // Allow Budget Officer to create the initial budget allocation based on the GAA/WFP offline documents.
-  // We only require approvedRequestId if this is a subsequent supplemental creation, 
-  // but since we only allow one allocation per department per FY (see 'existing' check below),
-  // this is always the initial creation. So we skip the approvedRequestId requirement here.
+  // A department may hold one uncategorised (general) bucket plus one bucket per
+  // spending category, so uniqueness is department + category — not department alone.
 
-  const existing = db.budgetAllocations.find(b => b.department.toLowerCase() === department.toLowerCase() && b.fiscalYearId === targetFy.id);
+  const normalizedCategory: SpendingCategory | undefined =
+    category && SPENDING_CATEGORIES.includes(category) ? category : undefined;
+
+  const existing = db.budgetAllocations.find(b =>
+    b.department.toLowerCase() === department.toLowerCase() &&
+    b.fiscalYearId === targetFy.id &&
+    (b.category || undefined) === normalizedCategory
+  );
   if (existing) {
-    return res.status(400).json({ status: "error", message: "Allocation for department already exists in this fiscal year. Please edit instead." });
+    const label = normalizedCategory ? `${department} / ${normalizedCategory}` : `${department} (General)`;
+    return res.status(400).json({ status: "error", message: `Allocation for ${label} already exists in this fiscal year. Please edit instead.` });
   }
 
   const ps = Number(allocatedPS) || 0;
@@ -2104,6 +2112,7 @@ app.post("/api/finance/budgets", authenticateToken, (req: any, res) => {
     id: `b-${Date.now()}`,
     fiscalYearId: targetFy.id,
     department,
+    category: normalizedCategory,
     budgetAllocation: finalBudgetAllocation,
     budgetUtilized: 0,
     remainingBudget: finalBudgetAllocation,
@@ -2119,8 +2128,9 @@ app.post("/api/finance/budgets", authenticateToken, (req: any, res) => {
     remainingCO: co
   };
   db.budgetAllocations.push(newBudget);
-  logFinanceAudit((req as any).user.fullName, "Create Budget Allocation", "Budget Monitoring", "None", `${budgetAllocation} for ${department}`);
-  logEvent((req as any).user.id, (req as any).user.username, (req as any).user.role, "Create Budget", `Created new budget allocation for ${department}: PHP ${budgetAllocation}`);
+  const bucketLabel = normalizedCategory ? `${department} / ${normalizedCategory}` : `${department} (General)`;
+  logFinanceAudit((req as any).user.fullName, "Create Budget Allocation", "Budget Monitoring", "None", `${finalBudgetAllocation} for ${bucketLabel}`);
+  logEvent((req as any).user.id, (req as any).user.username, (req as any).user.role, "Create Budget", `Created new budget allocation for ${bucketLabel}: PHP ${finalBudgetAllocation}`);
   saveDB();
   res.json({ status: "success", data: newBudget });
 });
@@ -4105,6 +4115,25 @@ app.get("/api/training/liquidations", authenticateToken, (req: any, res: any) =>
       total: breakdown[category]
     }));
 
+    // Actual spend grouped by the person it was charged to. Expenses with no
+    // participant (venue, speaker fees) collect under "Unassigned".
+    const byPerson = liquidations.reduce((acc, curr) => {
+      const key = curr.employeeId || "__unassigned__";
+      acc[key] = (acc[key] || 0) + Number(curr.amount || 0);
+      return acc;
+    }, {} as Record<string, number>);
+
+    const personBreakdown = Object.keys(byPerson).map(key => {
+      const emp = key === "__unassigned__"
+        ? null
+        : (db.employees || []).find(e => e.id === key || e.employeeId === key);
+      return {
+        employeeId: key === "__unassigned__" ? null : key,
+        name: emp ? emp.fullName : (key === "__unassigned__" ? "Unassigned (program-wide)" : key),
+        total: byPerson[key]
+      };
+    }).sort((a, b) => b.total - a.total);
+
     // Preset per-participant allocation guide (additive — existing consumers ignore it)
     const prog = (db.trainingPrograms || []).find(p => p.id === trainingProgramId);
     const perParticipant = prog ? computePerParticipantBreakdown(prog) : null;
@@ -4113,6 +4142,7 @@ app.get("/api/training/liquidations", authenticateToken, (req: any, res: any) =>
       status: "success",
       data: liquidations,
       breakdown: breakdownArray,
+      personBreakdown,
       perParticipant: perParticipant ? perParticipant.perParticipant : 0,
       perParticipantSplit: perParticipant ? perParticipant.split : []
     });
@@ -4122,15 +4152,31 @@ app.get("/api/training/liquidations", authenticateToken, (req: any, res: any) =>
 });
 
 app.post("/api/training/liquidations", authenticateToken, (req: any, res: any) => {
-  const { trainingProgramId, expenseCategory, description, amount, receiptFileName, dateIncurred } = req.body;
+  const { trainingProgramId, trainingParticipantId, expenseCategory, description, amount, receiptFileName, dateIncurred } = req.body;
   const amt = parseFloat(amount);
-  
+
   const prog = db.trainingPrograms.find(p => p.id === trainingProgramId);
   if (!prog) return res.status(404).json({ status: "error", message: "Program not found" });
+
+  if (!isFinite(amt) || amt <= 0) {
+    return res.status(400).json({ status: "error", message: "Please enter a valid expense amount greater than zero." });
+  }
+
+  // Charging an expense to a person is optional, but when given the participant
+  // must actually belong to this program.
+  let participant = null;
+  if (trainingParticipantId) {
+    participant = (db.trainingParticipants || []).find(p => p.id === trainingParticipantId);
+    if (!participant || participant.trainingProgramId !== trainingProgramId) {
+      return res.status(400).json({ status: "error", message: "Selected participant is not enrolled in this training program." });
+    }
+  }
 
   const liq: TrainingLiquidationExpense = {
     id: `tliq-${Date.now()}`,
     trainingProgramId,
+    trainingParticipantId: participant ? participant.id : undefined,
+    employeeId: participant ? participant.employeeId : undefined,
     expenseCategory,
     description,
     amount: amt,

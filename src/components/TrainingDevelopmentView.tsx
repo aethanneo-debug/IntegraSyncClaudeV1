@@ -28,12 +28,16 @@ export default function TrainingDevelopmentView({ user, triggerRefresh }: { user
   const [breakdownTotal, setBreakdownTotal] = useState<number>(0);
   const [perParticipant, setPerParticipant] = useState<number>(0);
   const [perParticipantSplit, setPerParticipantSplit] = useState<{ category: string; percentage: number; amount: number }[]>([]);
+  const [personBreakdown, setPersonBreakdown] = useState<{ employeeId: string | null; name: string; total: number }[]>([]);
   
   // Liquidation form
   const [expenseCategory, setExpenseCategory] = useState("Meals");
   const [liqDesc, setLiqDesc] = useState("");
   const [liqAmount, setLiqAmount] = useState("");
   const [liqDate, setLiqDate] = useState("");
+  const [liqParticipantId, setLiqParticipantId] = useState("");
+  const [liqError, setLiqError] = useState("");
+  const [liqSubmitting, setLiqSubmitting] = useState(false);
 
   useEffect(() => {
     fetchData();
@@ -273,6 +277,7 @@ export default function TrainingDevelopmentView({ user, triggerRefresh }: { user
       setBreakdownTotal(sum);
       setPerParticipant(res.perParticipant || 0);
       setPerParticipantSplit(res.perParticipantSplit || []);
+      setPersonBreakdown(res.personBreakdown || []);
       setShowBreakdownModal(p.id);
     }
   };
@@ -282,29 +287,58 @@ export default function TrainingDevelopmentView({ user, triggerRefresh }: { user
     setExpenseCategory("Meals");
     setLiqDesc("");
     setLiqAmount("");
+    setLiqParticipantId("");
+    setLiqError("");
     setLiqDate(new Date().toISOString().split("T")[0]);
     setShowLiqModal(true);
   };
 
+  // Remaining budget for the program currently open in the liquidation modal.
+  const liqProgram = programs.find(p => p.id === selectedProgramId);
+  const liqAlreadyFiled = liquidations
+    .filter(l => l.trainingProgramId === selectedProgramId)
+    .reduce((sum, l) => sum + Number(l.amount || 0), 0);
+  const liqRemaining = liqProgram ? Number(liqProgram.allocatedBudget) - liqAlreadyFiled : 0;
+  const liqExceeds = Number(liqAmount) > 0 && Number(liqAmount) > liqRemaining;
+
   async function handleCreateLiquidation(e: React.FormEvent) {
     e.preventDefault();
+    setLiqError("");
+
+    // Mirror the server rule locally so the user is told before submitting.
+    if (liqExceeds) {
+      setLiqError("Liquidation exceeds allocated training budget.");
+      return;
+    }
+
     const payload = {
       trainingProgramId: selectedProgramId,
+      trainingParticipantId: liqParticipantId || undefined,
       expenseCategory,
       description: liqDesc,
       amount: liqAmount,
       dateIncurred: liqDate
     };
-    const res = await apiCall("/api/training/liquidations", {
-      method: "POST",
-      body: JSON.stringify(payload)
-    });
-    if (res.status === "success") {
-      setShowLiqModal(false);
-      fetchData();
-      triggerRefresh();
-    } else {
-      alert("Error: " + res.message);
+
+    setLiqSubmitting(true);
+    try {
+      // apiCall throws on a non-2xx response, so the server's message only
+      // reaches the user through this catch.
+      const res = await apiCall("/api/training/liquidations", {
+        method: "POST",
+        body: JSON.stringify(payload)
+      });
+      if (res.status === "success") {
+        setShowLiqModal(false);
+        fetchData();
+        triggerRefresh();
+      } else {
+        setLiqError(res.message || "Failed to file the liquidation expense.");
+      }
+    } catch (err: any) {
+      setLiqError(err.message || "Failed to file the liquidation expense.");
+    } finally {
+      setLiqSubmitting(false);
     }
   }
 
@@ -666,21 +700,40 @@ export default function TrainingDevelopmentView({ user, triggerRefresh }: { user
             </div>
 
             <div className="p-6 overflow-y-auto flex-1">
-              {(() => {
-                const prog = programs.find(p => p.id === selectedProgramId);
-                if (!prog) return null;
-                const filed = liquidations.filter(l => l.trainingProgramId === prog.id).reduce((sum, l) => sum + Number(l.amount || 0), 0);
-                return (
-                  <div className="mb-5 p-3 bg-slate-50 border border-slate-200 rounded-lg">
-                    <h4 className="text-sm font-bold text-slate-700">{prog.title}</h4>
-                    <p className="text-xs text-slate-500 mt-1">
-                      Allocated ₱{Number(prog.allocatedBudget).toLocaleString()} &middot; Already liquidated ₱{filed.toLocaleString()} &middot; Remaining ₱{Math.max(0, Number(prog.allocatedBudget) - filed).toLocaleString()}
-                    </p>
-                  </div>
-                );
-              })()}
+              {liqProgram && (
+                <div className="mb-5 p-3 bg-slate-50 border border-slate-200 rounded-lg">
+                  <h4 className="text-sm font-bold text-slate-700">{liqProgram.title}</h4>
+                  <p className="text-xs text-slate-500 mt-1">
+                    Allocated ₱{Number(liqProgram.allocatedBudget).toLocaleString()} &middot; Already liquidated ₱{liqAlreadyFiled.toLocaleString()} &middot; Remaining <span className={liqRemaining <= 0 ? "font-bold text-red-600" : "font-bold text-emerald-700"}>₱{Math.max(0, liqRemaining).toLocaleString()}</span>
+                  </p>
+                </div>
+              )}
+
+              {liqError && (
+                <div className="mb-4 p-3 bg-red-50 border border-red-200 rounded-lg flex items-start gap-2">
+                  <AlertTriangle size={16} className="text-red-600 mt-0.5 shrink-0" />
+                  <p className="text-sm text-red-700 font-medium">{liqError}</p>
+                </div>
+              )}
 
               <form id="liqForm" onSubmit={handleCreateLiquidation} className="space-y-4">
+                <div>
+                  <label className="block text-sm font-medium text-slate-700 mb-1">Charge to</label>
+                  <select value={liqParticipantId} onChange={e => setLiqParticipantId(e.target.value)} className="w-full border border-slate-300 rounded-lg px-3 py-2 bg-white focus:ring-2 focus:ring-blue-500 focus:outline-none">
+                    <option value="">Whole program (no specific person)</option>
+                    {participants
+                      .filter(pt => pt.trainingProgramId === selectedProgramId && pt.status !== "Cancelled")
+                      .map(pt => {
+                        const emp = employees.find(e => e.id === pt.employeeId || e.employeeId === pt.employeeId);
+                        return (
+                          <option key={pt.id} value={pt.id}>
+                            {emp ? emp.fullName : pt.employeeId}
+                          </option>
+                        );
+                      })}
+                  </select>
+                  <p className="text-[11px] text-slate-400 mt-1">Leave as "Whole program" for shared costs like venue rental or speaker fees.</p>
+                </div>
                 <div>
                   <label className="block text-sm font-medium text-slate-700 mb-1">Expense Category *</label>
                   <select required value={expenseCategory} onChange={e => setExpenseCategory(e.target.value)} className="w-full border border-slate-300 rounded-lg px-3 py-2 bg-white focus:ring-2 focus:ring-blue-500 focus:outline-none">
@@ -700,7 +753,11 @@ export default function TrainingDevelopmentView({ user, triggerRefresh }: { user
                 <div className="grid grid-cols-2 gap-4">
                   <div>
                     <label className="block text-sm font-medium text-slate-700 mb-1">Amount (₱) *</label>
-                    <input required type="number" min="0" step="0.01" value={liqAmount} onChange={e => setLiqAmount(e.target.value)} className="w-full border border-slate-300 rounded-lg px-3 py-2 focus:ring-2 focus:ring-blue-500 focus:outline-none" />
+                    <input required type="number" min="0" step="0.01" value={liqAmount} onChange={e => { setLiqAmount(e.target.value); setLiqError(""); }}
+                      className={`w-full border rounded-lg px-3 py-2 focus:ring-2 focus:outline-none ${liqExceeds ? "border-red-400 focus:ring-red-500 bg-red-50" : "border-slate-300 focus:ring-blue-500"}`} />
+                    {liqExceeds && (
+                      <p className="text-xs text-red-600 font-medium mt-1">Liquidation exceeds allocated training budget.</p>
+                    )}
                   </div>
                   <div>
                     <label className="block text-sm font-medium text-slate-700 mb-1">Date Incurred *</label>
@@ -712,7 +769,10 @@ export default function TrainingDevelopmentView({ user, triggerRefresh }: { user
 
             <div className="px-6 py-4 border-t border-slate-200 bg-slate-50 flex justify-end gap-3 shrink-0">
               <button onClick={() => setShowLiqModal(false)} className="px-4 py-2 text-slate-600 bg-white border border-slate-300 rounded-lg hover:bg-slate-50">Cancel</button>
-              <button type="submit" form="liqForm" className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700">Submit Expense</button>
+              <button type="submit" form="liqForm" disabled={liqExceeds || liqSubmitting}
+                className={`px-4 py-2 rounded-lg text-white ${liqExceeds || liqSubmitting ? "bg-slate-300 cursor-not-allowed" : "bg-blue-600 hover:bg-blue-700"}`}>
+                {liqSubmitting ? "Submitting…" : "Submit Expense"}
+              </button>
             </div>
           </div>
         </div>
@@ -787,6 +847,22 @@ export default function TrainingDevelopmentView({ user, triggerRefresh }: { user
                       </tr>
                     </tfoot>
                   </table>
+
+                  {personBreakdown.length > 0 && (
+                    <div>
+                      <h5 className="text-xs font-semibold text-slate-500 uppercase mb-2">Liquidated per Person</h5>
+                      <table className="w-full text-left text-sm border border-slate-200 rounded-lg overflow-hidden">
+                        <tbody className="divide-y divide-slate-100">
+                          {personBreakdown.map((item, idx) => (
+                            <tr key={idx} className="hover:bg-slate-50">
+                              <td className={`px-4 py-2 ${item.employeeId ? "text-slate-700" : "text-slate-400 italic"}`}>{item.name}</td>
+                              <td className="px-4 py-2 text-right font-medium text-slate-700">₱{Number(item.total).toLocaleString()}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
 
                   {/* Visual Bar representation */}
                   <div className="mt-6">

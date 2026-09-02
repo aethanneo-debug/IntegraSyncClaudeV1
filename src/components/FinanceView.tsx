@@ -121,6 +121,8 @@ export default function FinanceView({
 
   // For budget edit
   const [editingBudget, setEditingBudget] = useState<BudgetAllocation | null>(null);
+  const [isAddBucketOpen, setIsAddBucketOpen] = useState(false);
+  const [addBucketForm, setAddBucketForm] = useState({ department: "", category: "", allocatedPS: "", allocatedMOOE: "", allocatedCO: "" });
   const [newAllocationVal, setNewAllocationVal] = useState("");
   const [editingHsacBudgetId, setEditingHsacBudgetId] = useState<string | null>(null);
   const [newHsacApprVal, setNewHsacApprVal] = useState("");
@@ -458,15 +460,18 @@ export default function FinanceView({
     }
   }
 
-  // Create budget allocation
-  async function handleCreateBudget(department: string, ps: number, mooe: number, co: number) {
+  // Create budget allocation. A department may hold one General (uncategorised)
+  // bucket plus one bucket per spending category.
+  async function handleCreateBudget(department: string, ps: number, mooe: number, co: number, category?: string) {
     try {
       const res = await apiCall(`/api/finance/budgets`, {
         method: "POST",
-        body: JSON.stringify({ department, allocatedPS: ps, allocatedMOOE: mooe, allocatedCO: co })
+        body: JSON.stringify({ department, category: category || undefined, allocatedPS: ps, allocatedMOOE: mooe, allocatedCO: co })
       });
       if (res.status === "success") {
         alert("New division budget allocation successfully created!");
+        setIsAddBucketOpen(false);
+        setAddBucketForm({ department: "", category: "", allocatedPS: "", allocatedMOOE: "", allocatedCO: "" });
         fetchFinanceAddons();
       }
     } catch (err: any) {
@@ -1731,6 +1736,134 @@ export default function FinanceView({
                     </div>
                   );
                 })()}
+
+                {/* DEPARTMENT BUDGET BUCKETS — utilization straight from budgetUtilized,
+                    which is the field automatic liquidation deduction updates. */}
+                <div className="bg-white border rounded-2xl p-5 shadow-sm space-y-4">
+                  <div className="flex flex-wrap justify-between items-center gap-3 pb-2 border-b">
+                    <div>
+                      <h3 className="text-sm font-extrabold uppercase text-slate-800 font-mono tracking-wider">Department Budget Buckets ({activeFiscalYear})</h3>
+                      <p className="text-xs text-slate-500 mt-0.5">A department may hold one General bucket plus one bucket per spending category.</p>
+                    </div>
+                    {isBudgetOrAdmin && currentFy?.status === "Active" && (
+                      <button
+                        onClick={() => setIsAddBucketOpen(!isAddBucketOpen)}
+                        className="bg-slate-900 hover:bg-slate-800 text-white text-[10px] font-bold py-2 px-3 uppercase tracking-wider rounded-lg flex items-center gap-1.5 cursor-pointer shadow-sm"
+                      >
+                        <Plus size={13} />
+                        <span>{isAddBucketOpen ? "Close Form" : "Add Budget Bucket"}</span>
+                      </button>
+                    )}
+                  </div>
+
+                  {isAddBucketOpen && (
+                    <div className="bg-slate-50 border border-slate-200 rounded-xl p-4 space-y-3">
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                        <div className="space-y-1">
+                          <label className="text-[10px] uppercase font-mono tracking-wider font-extrabold text-slate-500">Department *</label>
+                          <select
+                            value={addBucketForm.department}
+                            onChange={(e) => setAddBucketForm({ ...addBucketForm, department: e.target.value })}
+                            className="w-full bg-white border border-slate-200 p-2 text-xs font-semibold rounded-lg"
+                          >
+                            <option value="">— Select department —</option>
+                            <option value="Adjudication Division">Adjudication Division</option>
+                            <option value="Legal Division">Legal Division</option>
+                            <option value="Administrative and Finance Division">Administrative and Finance Division</option>
+                            <option value="Office of the Executive Clerk of Court">Office of the Executive Clerk of Court</option>
+                            <option value="Technical Division">Technical Division</option>
+                          </select>
+                        </div>
+                        <div className="space-y-1">
+                          <label className="text-[10px] uppercase font-mono tracking-wider font-extrabold text-slate-500">Spending Category</label>
+                          <select
+                            value={addBucketForm.category}
+                            onChange={(e) => setAddBucketForm({ ...addBucketForm, category: e.target.value })}
+                            className="w-full bg-white border border-slate-200 p-2 text-xs font-semibold rounded-lg"
+                          >
+                            <option value="">General (no category)</option>
+                            <option value="Personnel">Personnel</option>
+                            <option value="Training">Training</option>
+                            <option value="Seminar">Seminar</option>
+                            <option value="Request">Request</option>
+                          </select>
+                        </div>
+                      </div>
+                      <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                        {([["allocatedPS", "PS Amount"], ["allocatedMOOE", "MOOE Amount"], ["allocatedCO", "CO Amount"]] as const).map(([key, label]) => (
+                          <div key={key} className="space-y-1">
+                            <label className="text-[10px] uppercase font-mono tracking-wider font-extrabold text-slate-500">{label}</label>
+                            <input
+                              type="number" min="0" placeholder="0"
+                              value={(addBucketForm as any)[key]}
+                              onChange={(e) => setAddBucketForm({ ...addBucketForm, [key]: e.target.value })}
+                              className="w-full bg-white border border-slate-200 p-2 text-xs font-mono font-bold rounded-lg"
+                            />
+                          </div>
+                        ))}
+                      </div>
+                      <div className="flex justify-end gap-2 pt-1">
+                        <button onClick={() => setIsAddBucketOpen(false)} className="px-3 py-2 text-xs font-bold text-slate-600 bg-white border border-slate-300 rounded-lg hover:bg-slate-50">Cancel</button>
+                        <button
+                          disabled={!addBucketForm.department}
+                          onClick={() => handleCreateBudget(
+                            addBucketForm.department,
+                            Number(addBucketForm.allocatedPS) || 0,
+                            Number(addBucketForm.allocatedMOOE) || 0,
+                            Number(addBucketForm.allocatedCO) || 0,
+                            addBucketForm.category
+                          )}
+                          className={`px-3 py-2 text-xs font-bold text-white rounded-lg ${addBucketForm.department ? "bg-blue-600 hover:bg-blue-700" : "bg-slate-300 cursor-not-allowed"}`}
+                        >
+                          Create Bucket
+                        </button>
+                      </div>
+                    </div>
+                  )}
+
+                  <div className="overflow-x-auto rounded-lg border">
+                    <table className="w-full text-left text-xs border-collapse">
+                      <thead>
+                        <tr className="bg-slate-900 text-white font-mono uppercase text-[9px] tracking-wide">
+                          <th className="p-3">Department</th>
+                          <th className="p-3">Category</th>
+                          <th className="p-3 text-right">Allocation</th>
+                          <th className="p-3 text-right">Carry-over</th>
+                          <th className="p-3 text-right">Utilized</th>
+                          <th className="p-3 text-right">Remaining</th>
+                          <th className="p-3 text-center">% Used</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y font-mono text-[10px]">
+                        {budgets.filter(b => !currentFy || b.fiscalYearId === currentFy.id).length === 0 ? (
+                          <tr><td colSpan={7} className="p-6 text-center text-slate-400 font-sans">No budget buckets for this fiscal year yet.</td></tr>
+                        ) : budgets.filter(b => !currentFy || b.fiscalYearId === currentFy.id).map((b) => {
+                          const utilized = Number(b.budgetUtilized || 0);
+                          const remaining = Number(b.remainingBudget || 0);
+                          return (
+                            <tr key={b.id} className={`hover:bg-slate-50/50 ${remaining < 0 ? "bg-red-50" : ""}`}>
+                              <td className="p-3 font-sans font-bold text-slate-800">{b.department}</td>
+                              <td className="p-3">
+                                {b.category ? (
+                                  <span className="bg-indigo-50 text-indigo-700 border border-indigo-100 rounded px-1.5 py-0.5 font-bold text-[9px]">{b.category}</span>
+                                ) : (
+                                  <span className="text-slate-400 font-sans italic">General</span>
+                                )}
+                              </td>
+                              <td className="p-3 text-right font-bold">{formatCurrency(b.budgetAllocation)}</td>
+                              <td className="p-3 text-right font-semibold text-teal-700">{formatCurrency(b.carryOver || 0)}</td>
+                              <td className="p-3 text-right font-bold text-indigo-700">{formatCurrency(utilized)}</td>
+                              <td className={`p-3 text-right font-black ${remaining < 0 ? "text-red-600" : "text-slate-800"}`}>{formatCurrency(remaining)}</td>
+                              <td className="p-3 text-center">
+                                <span className="bg-blue-50 text-blue-900 rounded font-bold px-1.5 py-0.5 text-[9px]">{b.budgetPercentageUsed || 0}%</span>
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
               </div>
             )}
 
